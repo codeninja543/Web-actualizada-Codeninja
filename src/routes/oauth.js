@@ -10,9 +10,7 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const FRONTEND_URL         = process.env.FRONTEND_URL || 'http://localhost:5173';
 const BACKEND_URL          = process.env.BACKEND_URL  || 'http://localhost:3001';
 
-const GOOGLE_CALLBACK = process.env.NODE_ENV === 'production'
-  ? 'https://codeninja5.onrender.com/api/auth/google/callback'
-  : 'http://localhost:3001/api/auth/google/callback';
+const GOOGLE_CALLBACK = process.env.GOOGLE_CALLBACK;
 
 function makeJWT(user) {
   return jwt.sign(
