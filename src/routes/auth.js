@@ -12,13 +12,23 @@ function getJwtSecret() {
   return secret;
 }
 
-function verifyAdmin(req, res, next) {
+// ✅ Ahora consulta el role real desde Supabase, no del token
+async function verifyAdmin(req, res, next) {
   try {
     const auth = req.headers.authorization?.replace('Bearer ', '');
     if (!auth) return res.status(401).json({ error: 'Autenticación requerida' });
     const decoded = jwt.verify(auth, getJwtSecret());
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Solo el administrador puede realizar esta acción' });
-    req.admin = decoded;
+
+    const { data: dbUser } = await supabase
+      .from('users')
+      .select('id, role')
+      .eq('id', decoded.id)
+      .maybeSingle();
+
+    if (!dbUser) return res.status(401).json({ error: 'Usuario no encontrado' });
+    if (dbUser.role !== 'admin') return res.status(403).json({ error: 'Solo el administrador puede realizar esta acción' });
+
+    req.admin = { ...decoded, role: dbUser.role };
     next();
   } catch {
     return res.status(401).json({ error: 'Token inválido' });
@@ -112,6 +122,7 @@ router.post('/make-admin', authenticate, async (req, res) => {
   }
 });
 
+// GET /api/auth/admin/users
 router.get('/admin/users', verifyAdmin, async (req, res) => {
   try {
     const { data: users, error } = await supabase
@@ -125,6 +136,7 @@ router.get('/admin/users', verifyAdmin, async (req, res) => {
   }
 });
 
+// DELETE /api/auth/admin/users/:id
 router.delete('/admin/users/:id', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -137,7 +149,7 @@ router.delete('/admin/users/:id', verifyAdmin, async (req, res) => {
   }
 });
 
-// PATCH /api/auth/admin/users/:id/role — cambiar rol usuario
+// PATCH /api/auth/admin/users/:id/role
 router.patch('/admin/users/:id/role', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;

@@ -55,14 +55,23 @@ async function safeRpc(name, params) {
   }
 }
 
-// ── Middleware para verificar admin ───────────────────────────────────────
-function verifyAdmin(req, res, next) {
+// ✅ Ahora consulta el role real desde Supabase, no del token
+async function verifyAdmin(req, res, next) {
   try {
     const auth = req.headers.authorization?.replace('Bearer ', '');
     if (!auth) return res.status(401).json({ error: 'Autenticación requerida' });
     const decoded = jwt.verify(auth, process.env.JWT_SECRET);
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Solo el administrador puede realizar esta acción' });
-    req.admin = decoded;
+
+    const { data: dbUser } = await supabase
+      .from('users')
+      .select('id, role')
+      .eq('id', decoded.id)
+      .maybeSingle();
+
+    if (!dbUser) return res.status(401).json({ error: 'Usuario no encontrado' });
+    if (dbUser.role !== 'admin') return res.status(403).json({ error: 'Solo el administrador puede realizar esta acción' });
+
+    req.admin = { ...decoded, role: dbUser.role };
     next();
   } catch {
     return res.status(401).json({ error: 'Token inválido' });
@@ -171,7 +180,7 @@ router.get('/:id/download', optionalAuth, async (req, res) => {
   }
 });
 
-// POST /api/templates/:id/like
+
 router.post('/:id/like', authenticate, async (req, res) => {
   try {
     const { id } = req.params;
@@ -190,7 +199,6 @@ router.post('/:id/like', authenticate, async (req, res) => {
   }
 });
 
-// POST /api/templates/:id/purchase
 router.post('/:id/purchase', optionalAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -210,7 +218,7 @@ router.post('/:id/purchase', optionalAuth, async (req, res) => {
   }
 });
 
-// PATCH /api/templates/:id/price (admin only) — actualiza tipo y precio
+
 router.patch('/:id/price', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -242,7 +250,6 @@ router.patch('/:id/price', verifyAdmin, async (req, res) => {
   }
 });
 
-// PATCH /api/templates/:id/admin-update (admin only) — actualiza todos los campos
 router.patch('/:id/admin-update', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -270,7 +277,6 @@ router.patch('/:id/admin-update', verifyAdmin, async (req, res) => {
   }
 });
 
-// DELETE /api/templates/:id (admin only)
 router.delete('/:id', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -282,7 +288,6 @@ router.delete('/:id', verifyAdmin, async (req, res) => {
   }
 });
 
-// GET /api/templates/:slug — MUST BE LAST
 router.get('/:slug', optionalAuth, async (req, res) => {
   try {
     const { slug } = req.params;
