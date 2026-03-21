@@ -178,7 +178,7 @@ router.get('/google/callback', async (req, res) => {
 
     const token = makeJWT(user);
 
-    res.send(popupSuccess(token));
+   res.redirect(`${FRONTEND_URL}/auth/success?token=${token}`);
 
   } catch (err) {
   console.error("ERROR GOOGLE:", err);
