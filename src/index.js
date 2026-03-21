@@ -21,6 +21,13 @@ const PORT = process.env.PORT || 3001;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ─── Permitir comunicación popup Google ───────────────────────────────────
+app.use((req, res, next) => {
+  res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
+  next();
+});
+
 const corsOrigins = process.env.FRONTEND_URL
   ? process.env.FRONTEND_URL.split(',').map(s => s.trim()).filter(Boolean)
   : null;
@@ -46,8 +53,6 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/donations', donationRoutes);
 app.use('/api/paypal', paypalRoutes);
 
-// ─── Frontend build (Vite) ───────────────────────────────────────────────
-// Coloca el build en backend/dist y se sirve automaticamente
 const frontendDist = process.env.FRONTEND_DIST
   ? path.resolve(process.env.FRONTEND_DIST)
   : path.resolve(__dirname, '../dist');
@@ -60,8 +65,7 @@ if (fs.existsSync(frontendDist)) {
   });
 }
 
-// ─── Visor de archivos HTML ────────────────────────────────────────────────
-// Sirve el HTML con Content-Type: text/html para que el navegador lo RENDERICE
+// ─── Visor de archivos HTML ───────────────────────────────────────────────
 app.get('/api/view-proxy', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).send('<p>URL requerida</p>');
@@ -72,13 +76,18 @@ app.get('/api/view-proxy', async (req, res) => {
 
     const html = await response.text();
 
-    // Forzar Content-Type text/html para que el navegador renderice el diseño
+    const faviconTag = `<link rel="icon" type="image/png" href="https://i.postimg.cc/8zGk67y3/FB-IMG-8408596291127656794.jpg" />`;
+    const modifiedHtml = html.includes('<head>')
+      ? html
+          .replace(/<link[^>]*rel=["'](?:icon|shortcut icon)["'][^>]*>/gi, '')
+          .replace('<head>', `<head>\n  ${faviconTag}`)
+      : html;
+
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
-    // Permitir que se abra en iframe o pestaña directamente
     res.setHeader('X-Frame-Options', 'ALLOWALL');
     res.setHeader('Content-Security-Policy', '');
-    res.send(html);
+    res.send(modifiedHtml);
   } catch (err) {
     console.error('View proxy error:', err.message);
     res.status(500).send(`<html><body style="font-family:sans-serif;padding:2rem;color:red">
@@ -87,9 +96,7 @@ app.get('/api/view-proxy', async (req, res) => {
   }
 });
 
-// ─── Descarga forzada de archivos ─────────────────────────────────────────
-// Proxy de descarga para forzar Content-Disposition: attachment
-// Evita que el navegador abra el HTML en vez de descargarlo
+// ─── Descarga forzada ─────────────────────────────────────────────────────
 app.get('/api/download-proxy', async (req, res) => {
   const { url, filename } = req.query;
   if (!url) return res.status(400).json({ error: 'URL requerida' });
@@ -112,10 +119,7 @@ app.get('/api/download-proxy', async (req, res) => {
   }
 });
 
-
-// ─── Proxy de video — sirve el video con headers CORS correctos ────────────
-// ─── Proxy de video con streaming real ─────────────────────────────────────
-
+// ─── Proxy de video ───────────────────────────────────────────────────────
 app.get('/api/video-proxy', (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).send('URL requerida');
@@ -161,8 +165,6 @@ app.get('/api/video-proxy', (req, res) => {
   proxyReq.end();
 });
 
-
-// ─── Debug: ver video_url de una plantilla ────────────────────────────────
 app.get('/api/debug/video/:slug', async (req, res) => {
   const { supabase } = await import('./lib/supabase.js');
   const { data } = await supabase
@@ -188,7 +190,7 @@ app.use((req, res) => res.status(404).json({ error: `Ruta no encontrada: ${req.m
 app.use((err, req, res, _next) => res.status(500).json({ error: err.message || 'Error interno' }));
 
 app.listen(PORT, async () => {
-  console.log(`\n🚀 Backend en http://localhost:${PORT}`);
+  console.log(`\n✅ Backend en http://localhost:${PORT}`);
   await ensureBuckets();
   await verifyTables();
   console.log('✅ Backend listo\n');

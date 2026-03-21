@@ -1,15 +1,3 @@
-/**
- * OAuth Google (Facebook eliminado por solicitud del admin)
- *
- * CONFIGURACIÓN EN .env:
- *   GOOGLE_CLIENT_ID=...apps.googleusercontent.com
- *   GOOGLE_CLIENT_SECRET=GOCSPX-...
- *   FRONTEND_URL=http://localhost:5173
- *   BACKEND_URL=http://localhost:3001
- *
- * En Google Console → Redirect URI: ${BACKEND_URL}/api/auth/google/callback
- */
-
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import jwt from 'jsonwebtoken';
@@ -22,6 +10,10 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const FRONTEND_URL         = process.env.FRONTEND_URL || 'http://localhost:5173';
 const BACKEND_URL          = process.env.BACKEND_URL  || 'http://localhost:3001';
 
+const GOOGLE_CALLBACK = process.env.NODE_ENV === 'production'
+  ? 'https://codeninja5.onrender.com/api/auth/google/callback'
+  : 'http://localhost:3001/api/auth/google/callback';
+
 function makeJWT(user) {
   return jwt.sign(
     { id: user.id, email: user.email, role: user.role },
@@ -29,7 +21,7 @@ function makeJWT(user) {
     { expiresIn: '7d' }
   );
 }
-
+console.log("CALLBACK QUE SE ENVÍA:", GOOGLE_CALLBACK);
 async function upsertSocialUser({ email, fullName, avatarUrl, provider }) {
   if (!email) throw new Error(`${provider} no proporcionó un email.`);
 
@@ -46,7 +38,7 @@ async function upsertSocialUser({ email, fullName, avatarUrl, provider }) {
       await supabase.from('users').update({ avatar_url: avatarUrl }).eq('id', user.id);
       user.avatar_url = avatarUrl;
     }
-    console.log(`[${provider}] ✅ Usuario existente: ${user.email}`);
+    console.log(`[${provider}]  Usuario existente: ${user.email}`);
     return user;
   }
 
@@ -81,7 +73,7 @@ async function upsertSocialUser({ email, fullName, avatarUrl, provider }) {
     throw new Error('Error creando usuario: ' + insertErr.message);
   }
 
-  console.log(`[${provider}] ✅ Nuevo usuario: ${newUser.email}`);
+  console.log(`[${provider}] Nuevo usuario: ${newUser.email}`);
   return newUser;
 }
 
@@ -111,7 +103,7 @@ function popupSuccess(token) {
         if (window.opener && !window.opener.closed) {
           window.opener.postMessage({ token: token }, '*');
         }
-      } catch(e) { console.error('postMessage error:', e); }
+      } catch(e) {}
       setTimeout(function() { window.close(); }, 800);
     })();
   </script>
@@ -120,62 +112,41 @@ function popupSuccess(token) {
 }
 
 function popupError(msg) {
-  const safeMsg = String(msg).replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <title>Error de autenticación</title>
-  <style>
-    body { font-family: sans-serif; display:flex; align-items:center; justify-content:center;
-           height:100vh; margin:0; background:#fef2f2; }
-    .box { text-align:center; padding:2rem; }
-    .icon { font-size:3rem; }
-    p { color:#dc2626; margin-top:.5rem; font-size:.9rem; }
-  </style>
+  <title>Error</title>
 </head>
 <body>
-  <div class="box">
-    <div class="icon">❌</div>
-    <p>${safeMsg}</p>
-  </div>
+  <h2 style="color:red;text-align:center;">${msg}</h2>
   <script>
-    (function() {
-      var errorMsg = ${JSON.stringify(msg)};
-      try {
-        if (window.opener && !window.opener.closed) {
-          window.opener.postMessage({ error: errorMsg }, '*');
-        }
-      } catch(e) {}
-      setTimeout(function() { window.close(); }, 2500);
-    })();
+    setTimeout(() => window.close(), 2000);
   </script>
 </body>
 </html>`;
 }
 
-// ─── GOOGLE OAuth ──────────────────────────────────────────────────────────
-
 router.get('/google', (req, res) => {
   if (!GOOGLE_CLIENT_ID) {
-    return res.send(popupError('Google OAuth no configurado. Agrega GOOGLE_CLIENT_ID y GOOGLE_CLIENT_SECRET al .env del backend.'));
+    return res.send(popupError('Google OAuth no configurado'));
   }
+
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,
-    redirect_uri: `${BACKEND_URL}/api/auth/google/callback`,
+    redirect_uri: GOOGLE_CALLBACK, 
     response_type: 'code',
     scope: 'openid email profile',
     access_type: 'offline',
     prompt: 'select_account',
   });
+
   res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
 });
 
+// 🔵 CALLBACK GOOGLE
 router.get('/google/callback', async (req, res) => {
-  const { code, error } = req.query;
-  if (error || !code) {
-    return res.send(popupError('Acceso denegado a Google: ' + (error || 'sin código')));
-  }
+  const { code } = req.query;
 
   try {
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
@@ -185,21 +156,18 @@ router.get('/google/callback', async (req, res) => {
         code,
         client_id: GOOGLE_CLIENT_ID,
         client_secret: GOOGLE_CLIENT_SECRET,
-        redirect_uri: `${BACKEND_URL}/api/auth/google/callback`,
+        redirect_uri: GOOGLE_CALLBACK, 
         grant_type: 'authorization_code',
       }),
     });
+
     const tokenData = await tokenRes.json();
-    if (!tokenData.access_token) {
-      console.error('[Google] Token error:', tokenData);
-      throw new Error('No se obtuvo access_token de Google. Verifica las credenciales en .env');
-    }
 
     const profileRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
     });
+
     const profile = await profileRes.json();
-    console.log('[Google] Profile:', profile.email, profile.name);
 
     const user = await upsertSocialUser({
       email: profile.email,
@@ -209,13 +177,13 @@ router.get('/google/callback', async (req, res) => {
     });
 
     const token = makeJWT(user);
-    res.send(popupSuccess(token));
-  } catch (err) {
-    console.error('[Google] OAuth error:', err.message);
-    res.send(popupError(err.message || 'Error al autenticar con Google'));
-  }
-});
 
-// Facebook eliminado por solicitud del admin
+    res.send(popupSuccess(token));
+
+  } catch (err) {
+  console.error("ERROR GOOGLE:", err);
+  res.send(popupError(err.message || 'Error en autenticación'));
+}
+});
 
 export default router;
