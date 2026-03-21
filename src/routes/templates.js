@@ -55,6 +55,20 @@ async function safeRpc(name, params) {
   }
 }
 
+// ── Middleware para verificar admin ───────────────────────────────────────
+function verifyAdmin(req, res, next) {
+  try {
+    const auth = req.headers.authorization?.replace('Bearer ', '');
+    if (!auth) return res.status(401).json({ error: 'Autenticación requerida' });
+    const decoded = jwt.verify(auth, process.env.JWT_SECRET);
+    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Solo el administrador puede realizar esta acción' });
+    req.admin = decoded;
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Token inválido' });
+  }
+}
+
 // GET /api/templates
 router.get('/', async (req, res) => {
   try {
@@ -77,7 +91,6 @@ router.get('/', async (req, res) => {
     const { data: templates, error, count } = await query.range(offset, offset + parseInt(limit) - 1);
     if (error) {
       console.error('Supabase error:', error.message);
-      // Devolver array vacío en lugar de 500 para no romper el frontend
       return res.json({ templates: [], total: 0, page: parseInt(page), limit: parseInt(limit), error: error.message });
     }
 
@@ -103,16 +116,9 @@ router.get('/:id/access', optionalAuth, async (req, res) => {
     if (error) return res.status(500).json({ error: 'Error de base de datos: ' + error.message });
     if (!template) return res.status(404).json({ error: 'Plantilla no encontrada' });
 
-    if (template.type !== 'vip') {
-      return res.json({ hasAccess: true, remaining: null });
-    }
+    if (template.type !== 'vip') return res.json({ hasAccess: true, remaining: null });
 
-    const access = await getVipAccess({
-      templateId: template.id,
-      userId: req.user?.id,
-      token,
-    });
-
+    const access = await getVipAccess({ templateId: template.id, userId: req.user?.id, token });
     const remaining = access?.remaining_downloads || 0;
     res.json({ hasAccess: remaining > 0, remaining });
   } catch (err) {
@@ -120,12 +126,10 @@ router.get('/:id/access', optionalAuth, async (req, res) => {
   }
 });
 
-// GET /api/templates/:id/download  — MUST BE BEFORE /:slug
+// GET /api/templates/:id/download
 router.get('/:id/download', optionalAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    console.log(`📥 Descarga: ${id}`);
-
     const token = getDownloadToken(req);
 
     const { data: template, error } = await supabase
@@ -138,26 +142,17 @@ router.get('/:id/download', optionalAuth, async (req, res) => {
     if (!template) return res.status(404).json({ error: 'Plantilla no encontrada' });
 
     if (template.type === 'vip') {
-      const access = await getVipAccess({
-        templateId: template.id,
-        userId: req.user?.id,
-        token,
-      });
-
+      const access = await getVipAccess({ templateId: template.id, userId: req.user?.id, token });
       if (!access || (access.remaining_downloads || 0) < 1) {
         return res.status(403).json({ error: 'Pago requerido o límite de descargas alcanzado' });
       }
-
       const newRemaining = Math.max((access.remaining_downloads || 0) - 1, 0);
-      await supabase.from('download_access')
-        .update({ remaining_downloads: newRemaining })
-        .eq('id', access.id);
+      await supabase.from('download_access').update({ remaining_downloads: newRemaining }).eq('id', access.id);
     }
 
     await safeRpc('increment_downloads', { template_id: template.id });
 
     let downloadUrl = template.file_url || null;
-
     if (template.file_path) {
       const { data: pub } = supabase.storage.from('templates').getPublicUrl(template.file_path);
       if (pub?.publicUrl && !pub.publicUrl.includes('undefined') && !pub.publicUrl.includes('null')) {
@@ -170,8 +165,6 @@ router.get('/:id/download', optionalAuth, async (req, res) => {
     }
 
     if (!downloadUrl) return res.status(404).json({ error: 'Archivo no disponible' });
-
-    console.log(`✅ Descarga OK: ${template.title}`);
     res.json({ downloadUrl, title: template.title });
   } catch (err) {
     res.status(500).json({ error: 'Error al obtener enlace: ' + err.message });
@@ -182,9 +175,7 @@ router.get('/:id/download', optionalAuth, async (req, res) => {
 router.post('/:id/like', authenticate, async (req, res) => {
   try {
     const { id } = req.params;
-
     const { data: existing } = await supabase.from('likes').select('id').eq('user_id', req.user.id).eq('template_id', id).maybeSingle();
-
     if (existing) {
       await supabase.from('likes').delete().eq('id', existing.id);
       await safeRpc('decrement_likes', { template_id: id });
@@ -204,10 +195,8 @@ router.post('/:id/purchase', optionalAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const { method, amount } = req.body;
-
     const { data: template } = await supabase.from('templates').select('id, title, price, type').eq('id', id).single();
     if (!template) return res.status(404).json({ error: 'Plantilla no encontrada' });
-
     await supabase.from('purchases').insert({
       user_id: req.user?.id || null,
       template_id: id,
@@ -215,43 +204,81 @@ router.post('/:id/purchase', optionalAuth, async (req, res) => {
       method: method || 'unknown',
       status: 'confirmed',
     });
-
     res.json({ success: true, message: 'Compra registrada' });
   } catch (err) {
-    console.error('Purchase error:', err.message);
     res.status(500).json({ error: 'Error al registrar compra' });
   }
 });
 
-// PATCH /api/templates/:id/price (admin only)
-router.patch('/:id/price', async (req, res) => {
+// PATCH /api/templates/:id/price (admin only) — actualiza tipo y precio
+router.patch('/:id/price', verifyAdmin, async (req, res) => {
   try {
-    const auth = req.headers.authorization?.replace('Bearer ', '');
-    if (!auth) return res.status(401).json({ error: 'Autenticación requerida' });
-
-    let decoded;
-    try {
-      decoded = jwt.verify(auth, process.env.JWT_SECRET);
-    } catch {
-      return res.status(401).json({ error: 'Token inválido' });
-    }
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Solo el administrador puede cambiar precios' });
-
     const { id } = req.params;
     const { price, type } = req.body;
     const updateData = {};
 
-    if (price !== undefined) updateData.price = parseFloat(price) || null;
     if (type !== undefined && (type === 'gratis' || type === 'vip')) {
       updateData.type = type;
-      if (type === 'gratis') updateData.price = null;
+      if (type === 'gratis') {
+        updateData.price = null;
+      } else if (price !== undefined) {
+        updateData.price = parseFloat(price) || null;
+      }
+    } else if (price !== undefined) {
+      updateData.price = parseFloat(price) || null;
     }
 
-    const { data, error } = await supabase.from('templates').update(updateData).eq('id', id).select('id, title, type, price').single();
+    const { data, error } = await supabase
+      .from('templates')
+      .update(updateData)
+      .eq('id', id)
+      .select('id, title, type, price')
+      .single();
+
     if (error) throw error;
     res.json({ success: true, template: data });
   } catch (err) {
-    res.status(500).json({ error: 'Error al actualizar precio: ' + err.message });
+    res.status(500).json({ error: 'Error al actualizar: ' + err.message });
+  }
+});
+
+// PATCH /api/templates/:id/admin-update (admin only) — actualiza todos los campos
+router.patch('/:id/admin-update', verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, description, category, published, file_url, video_url } = req.body;
+
+    const updateData = {};
+    if (title !== undefined)       updateData.title = title;
+    if (description !== undefined) updateData.description = description;
+    if (category !== undefined)    updateData.category = category;
+    if (published !== undefined)   updateData.published = published;
+    if (file_url !== undefined)    updateData.file_url = file_url;
+    if (video_url !== undefined)   updateData.video_url = video_url;
+
+    const { data, error } = await supabase
+      .from('templates')
+      .update(updateData)
+      .eq('id', id)
+      .select('id, title, description, category, published, file_url, video_url')
+      .single();
+
+    if (error) throw error;
+    res.json({ success: true, template: data });
+  } catch (err) {
+    res.status(500).json({ error: 'Error al actualizar: ' + err.message });
+  }
+});
+
+// DELETE /api/templates/:id (admin only)
+router.delete('/:id', verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error } = await supabase.from('templates').delete().eq('id', id);
+    if (error) throw error;
+    res.json({ success: true, message: 'Plantilla eliminada' });
+  } catch (err) {
+    res.status(500).json({ error: 'Error al eliminar: ' + err.message });
   }
 });
 
@@ -259,8 +286,6 @@ router.patch('/:id/price', async (req, res) => {
 router.get('/:slug', optionalAuth, async (req, res) => {
   try {
     const { slug } = req.params;
-    console.log(`🔍 Buscando: ${slug}`);
-
     const { data: template, error } = await supabase
       .from('templates')
       .select('*, users(username, avatar_url, role)')
@@ -272,8 +297,6 @@ router.get('/:slug', optionalAuth, async (req, res) => {
     if (!template.published) return res.status(404).json({ error: 'Esta plantilla no está publicada aún' });
 
     await safeRpc('increment_views', { template_id: template.id });
-
-    console.log(`✅ Encontrada: ${template.title}`);
     res.json(template);
   } catch (err) {
     res.status(500).json({ error: 'Error interno: ' + err.message });
