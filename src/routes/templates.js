@@ -55,7 +55,6 @@ async function safeRpc(name, params) {
   }
 }
 
-// ✅ Ahora consulta el role real desde Supabase, no del token
 async function verifyAdmin(req, res, next) {
   try {
     const auth = req.headers.authorization?.replace('Bearer ', '');
@@ -180,17 +179,26 @@ router.get('/:id/download', optionalAuth, async (req, res) => {
   }
 });
 
-
-router.post('/:id/like', authenticate, async (req, res) => {
+// POST /api/templates/:id/like — cualquier persona puede dar like (sin login)
+router.post('/:id/like', optionalAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    const { data: existing } = await supabase.from('likes').select('id').eq('user_id', req.user.id).eq('template_id', id).maybeSingle();
-    if (existing) {
-      await supabase.from('likes').delete().eq('id', existing.id);
-      await safeRpc('decrement_likes', { template_id: id });
-      return res.json({ liked: false });
+    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+
+    if (req.user?.id) {
+      // Usuario logueado — toggle like
+      const { data: existing } = await supabase.from('likes').select('id').eq('user_id', req.user.id).eq('template_id', id).maybeSingle();
+      if (existing) {
+        await supabase.from('likes').delete().eq('id', existing.id);
+        await safeRpc('decrement_likes', { template_id: id });
+        return res.json({ liked: false });
+      } else {
+        await supabase.from('likes').insert({ user_id: req.user.id, template_id: id });
+        await safeRpc('increment_likes', { template_id: id });
+        return res.json({ liked: true });
+      }
     } else {
-      await supabase.from('likes').insert({ user_id: req.user.id, template_id: id });
+      // Usuario anónimo — solo incrementar (no toggle)
       await safeRpc('increment_likes', { template_id: id });
       return res.json({ liked: true });
     }
@@ -199,6 +207,7 @@ router.post('/:id/like', authenticate, async (req, res) => {
   }
 });
 
+// POST /api/templates/:id/purchase
 router.post('/:id/purchase', optionalAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -218,7 +227,18 @@ router.post('/:id/purchase', optionalAuth, async (req, res) => {
   }
 });
 
+// POST /api/templates/:id/copy-link ← NUEVO contador de copias de link
+router.post('/:id/copy-link', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await safeRpc('increment_link_copies', { template_id: id });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Error al registrar copia' });
+  }
+});
 
+// PATCH /api/templates/:id/price (admin only)
 router.patch('/:id/price', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -250,6 +270,7 @@ router.patch('/:id/price', verifyAdmin, async (req, res) => {
   }
 });
 
+// PATCH /api/templates/:id/admin-update (admin only)
 router.patch('/:id/admin-update', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -277,6 +298,7 @@ router.patch('/:id/admin-update', verifyAdmin, async (req, res) => {
   }
 });
 
+// DELETE /api/templates/:id (admin only)
 router.delete('/:id', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -288,6 +310,7 @@ router.delete('/:id', verifyAdmin, async (req, res) => {
   }
 });
 
+// GET /api/templates/:slug — MUST BE LAST
 router.get('/:slug', optionalAuth, async (req, res) => {
   try {
     const { slug } = req.params;
