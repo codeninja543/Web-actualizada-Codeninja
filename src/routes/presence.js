@@ -1,132 +1,145 @@
 import { Router } from 'express';
-import { supabase } from '../lib/supabase.js';
+import jwt from 'jsonwebtoken';
 
 const router = Router();
 
-const activeUsers = new Map();
-const TIMEOUT_MS = 30_000;
+// Mapa en memoria: sessionId -> { username, user_id, ip, page, last_seen, joined_at }
+const activeSessions = new Map();
 
-function cleanup() {
+// Clientes SSE conectados: Set de { res, userId }
+const sseClients = new Set();
+
+// Limpiar sesiones inactivas cada 30s
+setInterval(() => {
   const now = Date.now();
-  for (const [sid, data] of activeUsers.entries()) {
-    if (now - data.lastSeen > TIMEOUT_MS) activeUsers.delete(sid);
-  }
-}
-setInterval(cleanup, 15_000);
-
-function parseJwt(token) {
-  try {
-    if (!token || typeof token !== 'string') return null;
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-  
-    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-    const padded = base64 + '=='.slice((base64.length % 4) || 4);
-    return JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
-  } catch {
-    return null; 
-  }
-}
-
-router.post('/ping', async (req, res) => {
-  try {
-    const { sessionId, page } = req.body;
-    if (!sessionId) return res.status(400).json({ error: 'sessionId requerido' });
-
-    let userId = null;
-    let username = 'Visitante';
-
-    const auth = req.headers.authorization?.replace('Bearer ', '');
-    if (auth) {
-      const payload = parseJwt(auth);
-      if (payload?.id) {
-        try {
-          const { data } = await supabase
-            .from('users')
-            .select('id, username')
-            .eq('id', payload.id)
-            .maybeSingle();
-          if (data) { userId = data.id; username = data.username; }
-        } catch { /* ignorar error de BD */ }
-      }
+  let changed = false;
+  for (const [key, val] of activeSessions.entries()) {
+    if (now - val.last_seen > 90000) {
+      activeSessions.delete(key);
+      changed = true;
     }
-
-    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '')
-      .split(',')[0].trim();
-
-    activeUsers.set(sessionId, {
-      sessionId,
-      ip,
-      page: page || '/',
-      userAgent: req.headers['user-agent'] || '',
-      userId,
-      username,
-      lastSeen: Date.now(),
-      joinedAt: activeUsers.get(sessionId)?.joinedAt || Date.now(),
-    });
-
-    res.json({ ok: true, online: activeUsers.size });
-  } catch (err) {
-    console.error('[presence/ping]', err.message);
-    res.status(500).json({ error: 'Error interno' });
   }
+  if (changed) broadcastOnlineUsers();
+}, 30000);
+
+function getOnlineData() {
+  const now = Date.now();
+  const users = Array.from(activeSessions.values()).map(u => ({
+    session_id: u.session_id,
+    user_id: u.user_id,
+    username: u.username,
+    page: u.page,
+    ip: u.ip,
+    is_logged_in: !!u.user_id,
+    last_seen: new Date(u.last_seen).toISOString(),
+    minutes_online: Math.floor((now - u.joined_at) / 60000),
+  }));
+  return {
+    count: users.length,
+    logged_in: users.filter(u => u.is_logged_in).length,
+    visitors: users.filter(u => !u.is_logged_in).length,
+    users,
+  };
+}
+
+function broadcastOnlineUsers() {
+  if (sseClients.size === 0) return;
+  const data = JSON.stringify(getOnlineData());
+  for (const client of sseClients) {
+    try {
+      client.res.write(`event: online-users\ndata: ${data}\n\n`);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
+// ── POST /api/presence/ping ───────────────────────────────────────────────
+router.post('/ping', (req, res) => {
+  const { session_id, user_id, username, page } = req.body;
+  if (!session_id) return res.status(400).json({ error: 'session_id requerido' });
+
+  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown')
+    .split(',')[0].trim();
+
+  activeSessions.set(session_id, {
+    session_id,
+    user_id: user_id || null,
+    username: username || 'Visitante',
+    page: page || '/',
+    ip,
+    last_seen: Date.now(),
+    joined_at: activeSessions.get(session_id)?.joined_at || Date.now(),
+  });
+
+  broadcastOnlineUsers();
+  res.json({ ok: true, online: activeSessions.size });
 });
 
+// ── DELETE /api/presence/leave ────────────────────────────────────────────
 router.delete('/leave', (req, res) => {
+  const { session_id } = req.body;
+  if (session_id) {
+    activeSessions.delete(session_id);
+    broadcastOnlineUsers();
+  }
+  res.json({ ok: true });
+});
+
+// ── GET /api/presence/online — solo admin, consulta directa ──────────────
+router.get('/online', (req, res) => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Autenticación requerida' });
   try {
-    const { sessionId } = req.body;
-    if (sessionId) activeUsers.delete(sessionId);
-    res.json({ ok: true });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Solo administradores' });
   } catch {
-    res.json({ ok: true });
+    return res.status(401).json({ error: 'Token inválido' });
   }
+  res.json(getOnlineData());
 });
 
-// ── GET /api/presence/admin ────────────────────────────────────────────────
-router.get('/admin', async (req, res) => {
+// ── GET /api/presence/online/stream — SSE solo admin ─────────────────────
+router.get('/online/stream', (req, res) => {
+  const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Autenticación requerida' });
   try {
-    const auth = req.headers.authorization?.replace('Bearer ', '');
-    if (!auth) return res.status(401).json({ error: 'Autenticación requerida' });
-
-    const payload = parseJwt(auth);
-    if (!payload?.id) return res.status(401).json({ error: 'Token inválido' });
-
-    const { data: dbUser } = await supabase
-      .from('users').select('role').eq('id', payload.id).maybeSingle();
-
-    if (!dbUser || dbUser.role !== 'admin')
-      return res.status(403).json({ error: 'Solo administradores' });
-
-    cleanup();
-
-    const users = [...activeUsers.values()].map(u => ({
-      sessionId: u.sessionId,
-      page: u.page,
-      ip: u.ip,
-      username: u.username,
-      userId: u.userId,
-      isLoggedIn: !!u.userId,
-      userAgent: u.userAgent,
-      lastSeen: new Date(u.lastSeen).toISOString(),
-      joinedAt: new Date(u.joinedAt).toISOString(),
-      secondsOnline: Math.floor((Date.now() - u.joinedAt) / 1000),
-    }));
-
-    res.json({
-      total: users.length,
-      loggedIn: users.filter(u => u.isLoggedIn).length,
-      visitors: users.filter(u => !u.isLoggedIn).length,
-      users,
-    });
-  } catch (err) {
-    console.error('[presence/admin]', err.message);
-    res.status(500).json({ error: 'Error interno' });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Solo administradores' });
+  } catch {
+    return res.status(401).json({ error: 'Token inválido' });
   }
+
+  // Configurar SSE
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  // Enviar estado actual inmediatamente
+  const data = JSON.stringify(getOnlineData());
+  res.write(`event: online-users\ndata: ${data}\n\n`);
+
+  // Registrar cliente
+  const client = { res };
+  sseClients.add(client);
+
+  // Ping cada 20s para mantener conexión viva
+  const keepAlive = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch { clearInterval(keepAlive); }
+  }, 20000);
+
+  // Limpiar al desconectar
+  req.on('close', () => {
+    sseClients.delete(client);
+    clearInterval(keepAlive);
+  });
 });
 
+// ── GET /api/presence/count — público, solo el número ────────────────────
 router.get('/count', (req, res) => {
-  cleanup();
-  res.json({ online: activeUsers.size });
+  res.json({ online: activeSessions.size });
 });
 
 export default router;
