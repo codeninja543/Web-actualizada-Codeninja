@@ -12,6 +12,15 @@ if (!supabaseUrl || !supabaseServiceKey) {
   process.exit(1);
 }
 
+// Safety check: ensure the configured key is the service_role key (starts with eyJ...),
+// not the public anon key that starts with sb_. Using the public key will cause RLS errors.
+if (supabaseServiceKey && String(supabaseServiceKey).startsWith('sb_')) {
+  console.error('\n❌ ERROR: SUPABASE_SERVICE_KEY parece ser la key pública (prefijo "sb_").');
+  console.error('   Debes usar la Service Role Key (empieza por "eyJ...") en backend/.env');
+  console.error('   Ve a Supabase Dashboard → Settings → API → Service Role Key y pégala en backend/.env');
+  process.exit(1);
+}
+
 export const supabase = createClient(supabaseUrl, supabaseServiceKey, {
   auth: { autoRefreshToken: false, persistSession: false },
   db: { schema: 'public' },

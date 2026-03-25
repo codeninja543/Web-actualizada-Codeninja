@@ -13,6 +13,7 @@ import uploadRoutes from './routes/upload.js';
 import donationRoutes from './routes/donations.js';
 import paypalRoutes from './routes/paypal.js';
 import presenceRoutes from './routes/presence.js';
+import ideasRoutes from './routes/ideas.js';
 import { ensureBuckets, verifyTables } from './lib/supabase.js';
 
 dotenv.config();
@@ -30,15 +31,32 @@ app.use((req, res, next) => {
 
 const corsOrigins = process.env.FRONTEND_URL
   ? process.env.FRONTEND_URL.split(',').map(s => s.trim()).filter(Boolean)
-  : null;
+  : [];
+
+// En desarrollo, permitir localhost; en producción, solo FRONTEND_URL
+const isProduction = process.env.NODE_ENV === 'production';
 
 app.use(cors({
-  origin: corsOrigins && corsOrigins.length > 0
-    ? (origin, callback) => {
-        if (!origin || corsOrigins.includes(origin)) return callback(null, true);
-        return callback(new Error('CORS not allowed'));
-      }
-    : true,
+  origin: (origin, callback) => {
+    const allowed = [
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+      ...corsOrigins,
+    ];
+    
+    if (!origin || allowed.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    if (isProduction) {
+      return callback(new Error('CORS not allowed'));
+    }
+    
+    // En desarrollo, permite cualquier origin
+    return callback(null, true);
+  },
   credentials: true,
   methods: ['GET','POST','PUT','DELETE','OPTIONS','PATCH'],
   allowedHeaders: ['Content-Type','Authorization'],
@@ -53,6 +71,7 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/donations', donationRoutes);
 app.use('/api/paypal', paypalRoutes);
 app.use('/api/presence', presenceRoutes);
+app.use('/api/ideas', ideasRoutes);
 
 const frontendDist = process.env.FRONTEND_DIST
   ? path.resolve(process.env.FRONTEND_DIST)

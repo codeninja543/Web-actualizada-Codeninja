@@ -137,6 +137,21 @@ router.get('/online/stream', (req, res) => {
   });
 });
 
+// ── GET /api/presence/debug — listado de sesiones (solo admin)
+router.get('/debug', (req, res) => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Autenticación requerida' });
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Solo administradores' });
+  } catch {
+    return res.status(401).json({ error: 'Token inválido' });
+  }
+
+  const sessions = Array.from(activeSessions.values());
+  res.json({ count: sessions.length, sessions });
+});
+
 // ── GET /api/presence/count — público, solo el número ────────────────────
 router.get('/count', (req, res) => {
   res.json({ online: activeSessions.size });
