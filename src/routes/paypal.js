@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { supabase } from '../lib/supabase.js';
+import { supabase, supabaseStorage } from '../lib/supabase.js';
 import { optionalAuth } from '../middleware/auth.js';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -208,10 +208,10 @@ router.post('/capture-order', optionalAuth, async (req, res) => {
       if (template) {
         let downloadUrl = template.file_url || null;
         if (template.file_path) {
-          const { data: pub } = supabase.storage.from('templates').getPublicUrl(template.file_path);
+          const { data: pub } = supabaseStorage.storage.from('templates').getPublicUrl(template.file_path);
           if (pub?.publicUrl) downloadUrl = pub.publicUrl;
           if (!downloadUrl) {
-            const { data: signed } = await supabase.storage.from('templates').createSignedUrl(template.file_path, 3600);
+            const { data: signed } = await supabaseStorage.storage.from('templates').createSignedUrl(template.file_path, 3600);
             if (signed?.signedUrl) downloadUrl = signed.signedUrl;
           }
         }

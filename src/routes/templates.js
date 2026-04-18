@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { supabase } from '../lib/supabase.js';
+import { supabase, supabaseStorage } from '../lib/supabase.js';
 import { optionalAuth, authenticate } from '../middleware/auth.js';
 import jwt from 'jsonwebtoken';
 
@@ -162,12 +162,12 @@ router.get('/:id/download', optionalAuth, async (req, res) => {
 
     let downloadUrl = template.file_url || null;
     if (template.file_path) {
-      const { data: pub } = supabase.storage.from('templates').getPublicUrl(template.file_path);
+      const { data: pub } = supabaseStorage.storage.from('templates').getPublicUrl(template.file_path);
       if (pub?.publicUrl && !pub.publicUrl.includes('undefined') && !pub.publicUrl.includes('null')) {
         downloadUrl = pub.publicUrl;
       }
       if (!downloadUrl) {
-        const { data: signed } = await supabase.storage.from('templates').createSignedUrl(template.file_path, 7200);
+        const { data: signed } = await supabaseStorage.storage.from('templates').createSignedUrl(template.file_path, 7200);
         if (signed?.signedUrl) downloadUrl = signed.signedUrl;
       }
     }

@@ -163,9 +163,9 @@ app.get('/api/debug/video/:slug', async (req, res) => {
 });
 
 app.get('/api/health', async (req, res) => {
-  const { supabase } = await import('./lib/supabase.js');
+  const { supabase, supabaseStorage } = await import('./lib/supabase.js');
   const db = await supabase.from('templates').select('id').limit(1);
-  const { data: buckets } = await supabase.storage.listBuckets();
+  const { data: buckets } = await supabaseStorage.storage.listBuckets();
   res.json({
     status: 'ok',
     database: db.error ? '❌ ' + db.error.message : '✅ OK',

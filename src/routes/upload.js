@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { supabase } from '../lib/supabase.js';
+import { supabase, supabaseStorage } from '../lib/supabase.js';
 import { authenticate } from '../middleware/auth.js';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -13,15 +13,15 @@ const upload = multer({
 });
 
 async function uploadToStorage(bucket, filename, buffer, mimetype) {
-  const { error } = await supabase.storage
+  const { error } = await supabaseStorage.storage
     .from(bucket)
     .upload(filename, buffer, { contentType: mimetype, upsert: true });
 
   if (error) {
     if (error.message?.toLowerCase().includes('bucket') || error.statusCode === 404) {
       console.log(`⚠️  Creando bucket '${bucket}'...`);
-      try { await supabase.storage.createBucket(bucket, { public: true }); } catch { }
-      const { error: re } = await supabase.storage
+      try { await supabaseStorage.storage.createBucket(bucket, { public: true }); } catch { }
+      const { error: re } = await supabaseStorage.storage
         .from(bucket).upload(filename, buffer, { contentType: mimetype, upsert: true });
       if (re) { console.error('Reintento fallido:', re.message); return null; }
     } else {
@@ -30,9 +30,9 @@ async function uploadToStorage(bucket, filename, buffer, mimetype) {
     }
   }
 
-  const { data: pub } = supabase.storage.from(bucket).getPublicUrl(filename);
+  const { data: pub } = supabaseStorage.storage.from(bucket).getPublicUrl(filename);
   if (pub?.publicUrl && !pub.publicUrl.includes('undefined')) return pub.publicUrl;
-  const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(filename, 31536000);
+  const { data: signed } = await supabaseStorage.storage.from(bucket).createSignedUrl(filename, 31536000);
   return signed?.signedUrl || null;
 }
 
