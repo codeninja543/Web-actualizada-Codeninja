@@ -273,7 +273,7 @@ router.patch('/:id/price', verifyAdmin, async (req, res) => {
 router.patch('/:id/admin-update', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, description, category, published, file_url, video_url } = req.body;
+    const { title, description, category, published, file_url, video_url, image_url } = req.body;
 
     const updateData = {};
     if (title !== undefined)       updateData.title = title;
@@ -282,12 +282,13 @@ router.patch('/:id/admin-update', verifyAdmin, async (req, res) => {
     if (published !== undefined)   updateData.published = published;
     if (file_url !== undefined)    updateData.file_url = file_url;
     if (video_url !== undefined)   updateData.video_url = video_url;
+    if (image_url !== undefined)   updateData.image_url = image_url;
 
     const { data, error } = await supabase
       .from('templates')
       .update(updateData)
       .eq('id', id)
-      .select('id, title, description, category, published, file_url, video_url')
+      .select('id, title, description, category, published, file_url, file_path, video_url, image_url')
       .single();
 
     if (error) throw error;
