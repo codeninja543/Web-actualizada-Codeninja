@@ -6,8 +6,12 @@ dotenv.config();
 const supabaseDbUrl = process.env.SUPABASE_DB_URL || process.env.SUPABASE_URL;
 const supabaseDbServiceKey = process.env.SUPABASE_DB_SERVICE_KEY || process.env.SUPABASE_SERVICE_KEY;
 
-const supabaseStorageUrl = process.env.SUPABASE_STORAGE_URL || process.env.SUPABASE_URL;
-const supabaseStorageServiceKey = process.env.SUPABASE_STORAGE_SERVICE_KEY || process.env.SUPABASE_SERVICE_KEY || null;
+// Storage selection order:
+// 1) SUPABASE_STORAGE_URL / SUPABASE_STORAGE_SERVICE_KEY (explicit)
+// 2) SUPABASE_STG_URL / SUPABASE_STG_KEY (alternate naming present in .env)
+// 3) fallback to SUPABASE_URL / SUPABASE_SERVICE_KEY (DB project)
+const supabaseStorageUrl = process.env.SUPABASE_STORAGE_URL || process.env.SUPABASE_STG_URL || process.env.SUPABASE_URL;
+const supabaseStorageServiceKey = process.env.SUPABASE_STORAGE_SERVICE_KEY || process.env.SUPABASE_STG_KEY || process.env.SUPABASE_SERVICE_KEY || null;
 
 if (!supabaseDbUrl || !supabaseDbServiceKey) {
   console.error('\n❌ ERROR: Faltan variables en backend/.env para la BD');

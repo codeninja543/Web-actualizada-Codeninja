@@ -186,7 +186,6 @@ router.post('/:id/like', optionalAuth, async (req, res) => {
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
 
     if (req.user?.id) {
-      // Usuario logueado — toggle like
       const { data: existing } = await supabase.from('likes').select('id').eq('user_id', req.user.id).eq('template_id', id).maybeSingle();
       if (existing) {
         await supabase.from('likes').delete().eq('id', existing.id);
@@ -227,7 +226,7 @@ router.post('/:id/purchase', optionalAuth, async (req, res) => {
   }
 });
 
-// POST /api/templates/:id/copy-link ← NUEVO contador de copias de link
+// POST /api/templates/:id/copy-link
 router.post('/:id/copy-link', async (req, res) => {
   try {
     const { id } = req.params;

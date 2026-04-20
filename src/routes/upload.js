@@ -43,7 +43,7 @@ router.post('/template', authenticate, upload.fields([
 ]), async (req, res) => {
   try {
     const isAdmin = req.user?.role === 'admin';
-    const { title, description, category, type, price, features, fileUrl, imageUrl: imageUrlParam } = req.body;
+    const { title, description, category, type, price, features, fileUrl, imageUrl: imageUrlParam, videoUrl: videoUrlParam } = req.body;
 
     if (!title?.trim())       return res.status(400).json({ error: 'El título es requerido' });
     if (!description?.trim()) return res.status(400).json({ error: 'La descripción es requerida' });
@@ -100,6 +100,11 @@ router.post('/template', authenticate, upload.fields([
       const url = await uploadToStorage('videos', filename, f.buffer, forcedMime);
       if (url) { videoUrl = url; console.log('✅ Video subido:', url.substring(0, 60) + '...'); }
       else console.warn('⚠️  Video no se pudo subir al bucket');
+    }
+
+    // Si no subieron un archivo de video pero proporcionaron una URL (YouTube), usarla
+    if (!videoUrl && isAdmin && videoUrlParam && String(videoUrlParam).trim()) {
+      videoUrl = String(videoUrlParam).trim();
     }
 
     let parsedFeatures = [];
