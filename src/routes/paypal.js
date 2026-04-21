@@ -14,7 +14,7 @@ function getPayPalBase() {
     : 'https://api-m.sandbox.paypal.com';
 }
 
-// ── GET TOKEN ─────────────────────────────
+// ── TOKEN ─────────────────────────────
 async function getPayPalToken() {
   const clientId = process.env.PAYPAL_CLIENT_ID;
   const secret = process.env.PAYPAL_CLIENT_SECRET;
@@ -47,7 +47,9 @@ router.post('/create-order', optionalAuth, async (req, res) => {
   try {
     const { amount, currency = 'USD', templateId } = req.body;
 
-    if (!amount) return res.status(400).json({ error: 'Monto inválido' });
+    if (!amount) {
+      return res.status(400).json({ error: 'Monto inválido' });
+    }
 
     const token = await getPayPalToken();
 
@@ -73,7 +75,7 @@ router.post('/create-order', optionalAuth, async (req, res) => {
 
     if (!orderRes.ok) throw new Error(JSON.stringify(order));
 
-    // ✅ GUARDAR ORDEN SIEMPRE
+    // Guardar orden
     await supabase.from('paypal_orders').insert({
       order_id: order.id,
       template_id: templateId || null,
@@ -91,14 +93,62 @@ router.post('/create-order', optionalAuth, async (req, res) => {
   }
 });
 
-// ── CAPTURE ORDER ─────────────────────────────
+// ── CAPTURE ORDER (VALIDACIÓN ANTES DE COBRAR) ─────────────────────────────
 router.post('/capture-order', optionalAuth, async (req, res) => {
   try {
     const { orderId, templateId } = req.body;
 
-    if (!orderId) {
-      return res.status(400).json({ error: 'orderId requerido' });
+    if (!orderId || !templateId) {
+      return res.status(400).json({ error: 'orderId y templateId requeridos' });
     }
+
+    // ─────────────────────────────────────────
+    // 🔒 VALIDACIÓN ANTES DE COBRAR
+    // ─────────────────────────────────────────
+
+    const { data: template, error } = await supabase
+      .from('templates')
+      .select('id, title, file_path, file_url')
+      .eq('id', templateId)
+      .single();
+
+    if (error || !template) {
+      return res.status(400).json({ error: 'Plantilla no existe' });
+    }
+
+    let downloadUrl = null;
+
+    // ✔ URL directa
+    if (template.file_url) {
+      downloadUrl = template.file_url;
+    }
+
+    // ✔ Verificar archivo en storage
+    if (!downloadUrl && template.file_path) {
+      const filePath = `templates/${template.file_path}`;
+
+      console.log('📂 Verificando archivo:', filePath);
+
+      const { data: signed } = await supabaseStorage
+        .from('templates')
+        .createSignedUrl(filePath, 60);
+
+      if (signed?.signedUrl) {
+        downloadUrl = signed.signedUrl;
+      }
+    }
+
+    if (!downloadUrl) {
+      return res.status(400).json({
+        error: 'Archivo no disponible, no se puede procesar el pago',
+      });
+    }
+
+    console.log('✅ Validación OK → se puede cobrar');
+
+    // ─────────────────────────────────────────
+    // 💰 AHORA SÍ COBRAR
+    // ─────────────────────────────────────────
 
     const token = await getPayPalToken();
 
@@ -116,8 +166,9 @@ router.post('/capture-order', optionalAuth, async (req, res) => {
     const capture = await captureRes.json();
 
     if (!captureRes.ok) throw new Error(JSON.stringify(capture));
+
     if (capture.status !== 'COMPLETED') {
-      throw new Error(`Pago no completado`);
+      throw new Error('Pago no completado');
     }
 
     const captureId =
@@ -129,7 +180,7 @@ router.post('/capture-order', optionalAuth, async (req, res) => {
     const currency =
       capture.purchase_units?.[0]?.payments?.captures?.[0]?.amount?.currency_code;
 
-    // 🔥 ACTUALIZAR PAGO (SIEMPRE)
+    // Guardar pago
     await supabase
       .from('paypal_orders')
       .update({
@@ -138,63 +189,24 @@ router.post('/capture-order', optionalAuth, async (req, res) => {
       })
       .eq('order_id', orderId);
 
-    console.log('💰 Pago guardado correctamente');
+    // Crear acceso descarga
+    const downloadToken = uuidv4();
 
-    // ── DESCARGA (NO CRÍTICO) ─────────────────
-    let downloadUrl = null;
-    let title = null;
+    await supabase.from('download_access').insert({
+      token: downloadToken,
+      template_id: templateId,
+      remaining_downloads: 2,
+    });
 
-    try {
-      const finalTemplateId = templateId;
-
-      if (finalTemplateId) {
-        const { data: template } = await supabase
-          .from('templates')
-          .select('id, title, file_path, file_url')
-          .eq('id', finalTemplateId)
-          .single();
-
-        if (template) {
-          title = template.title;
-
-          // ✔ URL directa
-          if (template.file_url) {
-            downloadUrl = template.file_url;
-          }
-
-          // ✔ Storage
-          if (!downloadUrl && template.file_path) {
-            const filePath = `templates/${template.file_path}`;
-
-            console.log('📂 PATH:', filePath);
-
-            const { data: signed } = await supabaseStorage
-              .from('templates')
-              .createSignedUrl(filePath, 3600);
-
-            downloadUrl = signed?.signedUrl;
-          }
-
-          // ✔ Crear acceso descarga
-          await supabase.from('download_access').insert({
-            token: uuidv4(),
-            template_id: finalTemplateId,
-            remaining_downloads: 2,
-          });
-        }
-      }
-    } catch (e) {
-      console.warn('⚠️ Error generando descarga:', e.message);
-    }
-
-    // ✅ RESPUESTA FINAL (NUNCA FALLA)
+    // RESPUESTA FINAL
     res.json({
       success: true,
       captureId,
       amount,
       currency,
-      downloadUrl, // puede ser null, pero no rompe
-      title,
+      downloadUrl,
+      title: template.title,
+      downloadToken,
     });
 
   } catch (err) {
