@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
 
-// ── Helpers PayPal ──────────────────────────────────────────
+// ── PAYPAL BASE ─────────────────────────────
 function getPayPalBase() {
   const env = (process.env.PAYPAL_ENV || 'sandbox').toLowerCase().trim();
 
@@ -14,12 +14,13 @@ function getPayPalBase() {
     : 'https://api-m.sandbox.paypal.com';
 }
 
+// ── GET TOKEN ─────────────────────────────
 async function getPayPalToken() {
   const clientId = process.env.PAYPAL_CLIENT_ID;
   const secret = process.env.PAYPAL_CLIENT_SECRET;
 
   if (!clientId || !secret) {
-    throw new Error('PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET no configurados');
+    throw new Error('Credenciales PayPal no configuradas');
   }
 
   const res = await fetch(`${getPayPalBase()}/v1/oauth2/token`, {
@@ -34,47 +35,19 @@ async function getPayPalToken() {
   const data = await res.json();
 
   if (!res.ok) {
-    console.error('❌ PayPal Token Error:', data);
-    throw new Error('No se pudo obtener token PayPal');
+    console.error('❌ PayPal error:', data);
+    throw new Error('Error autenticando con PayPal');
   }
 
   return data.access_token;
 }
 
-// ── CLIENT TOKEN ───────────────────────────────────────────
-router.get('/client-token', async (req, res) => {
-  try {
-    const token = await getPayPalToken();
-
-    const resp = await fetch(`${getPayPalBase()}/v1/identity/generate-token`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-    });
-
-    const data = await resp.json();
-
-    if (!resp.ok) throw new Error(JSON.stringify(data));
-
-    res.json({
-      clientToken: data.client_token,
-      clientId: process.env.PAYPAL_CLIENT_ID,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── CREATE ORDER ───────────────────────────────────────────
+// ── CREATE ORDER ─────────────────────────────
 router.post('/create-order', optionalAuth, async (req, res) => {
   try {
-    const { amount, currency = 'USD', templateId, type = 'purchase' } = req.body;
+    const { amount, currency = 'USD', templateId } = req.body;
 
-    if (!amount || isNaN(parseFloat(amount))) {
-      return res.status(400).json({ error: 'Monto inválido' });
-    }
+    if (!amount) return res.status(400).json({ error: 'Monto inválido' });
 
     const token = await getPayPalToken();
 
@@ -86,15 +59,13 @@ router.post('/create-order', optionalAuth, async (req, res) => {
       },
       body: JSON.stringify({
         intent: 'CAPTURE',
-        purchase_units: [
-          {
-            amount: {
-              currency_code: currency,
-              value: parseFloat(amount).toFixed(2),
-            },
-            custom_id: templateId || 'donation',
+        purchase_units: [{
+          amount: {
+            currency_code: currency,
+            value: parseFloat(amount).toFixed(2),
           },
-        ],
+          custom_id: templateId || 'donation',
+        }],
       }),
     });
 
@@ -102,17 +73,28 @@ router.post('/create-order', optionalAuth, async (req, res) => {
 
     if (!orderRes.ok) throw new Error(JSON.stringify(order));
 
+    // ✅ GUARDAR ORDEN SIEMPRE
+    await supabase.from('paypal_orders').insert({
+      order_id: order.id,
+      template_id: templateId || null,
+      user_id: req.user?.id || null,
+      amount: parseFloat(amount),
+      currency,
+      status: 'CREATED',
+    });
+
     res.json({ orderId: order.id });
+
   } catch (err) {
-    console.error('Create order error:', err.message);
+    console.error('❌ create-order:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── CAPTURE ORDER ──────────────────────────────────────────
+// ── CAPTURE ORDER ─────────────────────────────
 router.post('/capture-order', optionalAuth, async (req, res) => {
   try {
-    const { orderId } = req.body;
+    const { orderId, templateId } = req.body;
 
     if (!orderId) {
       return res.status(400).json({ error: 'orderId requerido' });
@@ -134,9 +116,8 @@ router.post('/capture-order', optionalAuth, async (req, res) => {
     const capture = await captureRes.json();
 
     if (!captureRes.ok) throw new Error(JSON.stringify(capture));
-
     if (capture.status !== 'COMPLETED') {
-      throw new Error(`Pago no completado: ${capture.status}`);
+      throw new Error(`Pago no completado`);
     }
 
     const captureId =
@@ -146,88 +127,78 @@ router.post('/capture-order', optionalAuth, async (req, res) => {
       capture.purchase_units?.[0]?.payments?.captures?.[0]?.amount?.value;
 
     const currency =
-      capture.purchase_units?.[0]?.payments?.captures?.[0]?.amount
-        ?.currency_code;
+      capture.purchase_units?.[0]?.payments?.captures?.[0]?.amount?.currency_code;
 
-    // 🔥 Obtener templateId correctamente desde PayPal
-    const templateId =
-      capture.purchase_units?.[0]?.custom_id;
+    // 🔥 ACTUALIZAR PAGO (SIEMPRE)
+    await supabase
+      .from('paypal_orders')
+      .update({
+        status: 'COMPLETED',
+        capture_id: captureId,
+      })
+      .eq('order_id', orderId);
 
-    console.log('🧠 TEMPLATE ID:', templateId);
+    console.log('💰 Pago guardado correctamente');
 
-    if (!templateId || templateId === 'donation') {
-      return res.json({
-        success: true,
-        captureId,
-        amount,
-        currency,
-      });
-    }
-
-    // 🔍 Buscar plantilla
-    const { data: template, error: templateError } = await supabase
-      .from('templates')
-      .select('id, title, file_path, file_url')
-      .eq('id', templateId)
-      .single();
-
-    if (templateError || !template) {
-      console.error('❌ Template no encontrado:', templateError);
-      throw new Error('Plantilla no encontrada');
-    }
-
-    console.log('🧠 TEMPLATE:', template);
-
+    // ── DESCARGA (NO CRÍTICO) ─────────────────
     let downloadUrl = null;
+    let title = null;
 
-    // ✔ PRIORIDAD 1: URL directa
-    if (template.file_url) {
-      downloadUrl = template.file_url;
-    }
+    try {
+      const finalTemplateId = templateId;
 
-    // ✔ PRIORIDAD 2: generar URL desde storage
-    if (!downloadUrl && template.file_path) {
-      try {
-        const { data: signed, error } = await supabaseStorage
+      if (finalTemplateId) {
+        const { data: template } = await supabase
           .from('templates')
-          .createSignedUrl(template.file_path, 3600);
+          .select('id, title, file_path, file_url')
+          .eq('id', finalTemplateId)
+          .single();
 
-        if (error) {
-          console.error('❌ Error signed URL:', error);
-        } else {
-          downloadUrl = signed?.signedUrl;
+        if (template) {
+          title = template.title;
+
+          // ✔ URL directa
+          if (template.file_url) {
+            downloadUrl = template.file_url;
+          }
+
+          // ✔ Storage
+          if (!downloadUrl && template.file_path) {
+            const filePath = `templates/${template.file_path}`;
+
+            console.log('📂 PATH:', filePath);
+
+            const { data: signed } = await supabaseStorage
+              .from('templates')
+              .createSignedUrl(filePath, 3600);
+
+            downloadUrl = signed?.signedUrl;
+          }
+
+          // ✔ Crear acceso descarga
+          await supabase.from('download_access').insert({
+            token: uuidv4(),
+            template_id: finalTemplateId,
+            remaining_downloads: 2,
+          });
         }
-      } catch (e) {
-        console.error('❌ Error creando URL:', e.message);
       }
+    } catch (e) {
+      console.warn('⚠️ Error generando descarga:', e.message);
     }
 
-    // ❌ VALIDACIÓN FINAL
-    if (!downloadUrl) {
-      throw new Error('No se obtuvo URL de descarga');
-    }
-
-    // Crear token descarga
-    const downloadToken = uuidv4();
-
-    await supabase.from('download_access').insert({
-      token: downloadToken,
-      template_id: templateId,
-      remaining_downloads: 2,
-    });
-
-    return res.json({
+    // ✅ RESPUESTA FINAL (NUNCA FALLA)
+    res.json({
       success: true,
       captureId,
       amount,
       currency,
-      downloadUrl,
-      title: template.title,
-      downloadToken,
+      downloadUrl, // puede ser null, pero no rompe
+      title,
     });
 
   } catch (err) {
-    console.error('❌ Capture error:', err.message);
+    console.error('❌ capture-order:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
