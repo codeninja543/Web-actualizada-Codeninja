@@ -33,7 +33,6 @@ const corsOrigins = process.env.FRONTEND_URL
   ? process.env.FRONTEND_URL.split(',').map(s => s.trim()).filter(Boolean)
   : [];
 
-// En desarrollo, permitir localhost; en producción, solo FRONTEND_URL
 const isProduction = process.env.NODE_ENV === 'production';
 
 app.use(cors({
@@ -45,16 +44,8 @@ app.use(cors({
       'http://127.0.0.1:3000',
       ...corsOrigins,
     ];
-    
-    if (!origin || allowed.includes(origin)) {
-      return callback(null, true);
-    }
-    
-    if (isProduction) {
-      return callback(new Error('CORS not allowed'));
-    }
-    
-    // En desarrollo, permite cualquier origin
+    if (!origin || allowed.includes(origin)) return callback(null, true);
+    if (isProduction) return callback(new Error('CORS not allowed'));
     return callback(null, true);
   },
   credentials: true,
@@ -64,14 +55,14 @@ app.use(cors({
 app.use(express.json({ limit: '200mb' }));
 app.use(express.urlencoded({ extended: true, limit: '200mb' }));
 
-app.use('/api/auth', authRoutes);
-app.use('/api/auth', oauthRoutes);
+app.use('/api/auth',      authRoutes);
+app.use('/api/auth',      oauthRoutes);
 app.use('/api/templates', templateRoutes);
-app.use('/api/upload', uploadRoutes);
+app.use('/api/upload',    uploadRoutes);
 app.use('/api/donations', donationRoutes);
-app.use('/api/paypal', paypalRoutes);
-app.use('/api/presence', presenceRoutes);
-app.use('/api/ideas', ideasRoutes);
+app.use('/api/paypal',    paypalRoutes);
+app.use('/api/presence',  presenceRoutes);
+app.use('/api/ideas',     ideasRoutes);
 
 const frontendDist = process.env.FRONTEND_DIST
   ? path.resolve(process.env.FRONTEND_DIST)
@@ -85,45 +76,114 @@ if (fs.existsSync(frontendDist)) {
   });
 }
 
+// ─── VIEW PROXY ───────────────────────────────────────────────────────────────
 app.get('/api/view-proxy', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).send('<p>URL requerida</p>');
+
   try {
-    const response = await fetch(decodeURIComponent(url));
+    const decodedUrl = decodeURIComponent(url);
+    const response = await fetch(decodedUrl, {
+      headers: { 'Accept': 'text/html,*/*' },
+    });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const html = await response.text();
+
+    // Leer como buffer para preservar encoding original
+    const rawBuffer = Buffer.from(await response.arrayBuffer());
+    let html = rawBuffer.toString('utf-8');
+
+    // Si el HTML está vacío, mostrar error claro
+    if (!html || html.trim().length === 0) {
+      return res.status(200).send(`
+        <html><body style="font-family:sans-serif;padding:2rem;text-align:center">
+          <h2 style="color:#ef4444">⚠️ Archivo vacío</h2>
+          <p>El archivo HTML no tiene contenido. Intenta subirlo de nuevo.</p>
+        </body></html>
+      `);
+    }
+
+    const baseUrl = decodedUrl.substring(0, decodedUrl.lastIndexOf('/') + 1);
+
+    // Convertir src/href relativos a absolutos
+    html = html.replace(
+      /(src|href|action)=(["'])(?!https?:\/\/)(?!data:)(?!#)(?!mailto:)([^"']+)\2/gi,
+      (match, attr, quote, p) => {
+        if (p.startsWith('//')) return `${attr}=${quote}https:${p}${quote}`;
+        const absolute = p.startsWith('/') ? new URL(p, decodedUrl).href : baseUrl + p;
+        return `${attr}=${quote}${absolute}${quote}`;
+      }
+    );
+
+    // Convertir url() en CSS a absolutos
+    html = html.replace(
+      /url\((['"]?)(?!https?:\/\/)(?!data:)([^'")]+)\1\)/gi,
+      (match, quote, p) => {
+        if (p.startsWith('//')) return `url(${quote}https:${p}${quote})`;
+        const absolute = p.startsWith('/') ? new URL(p, decodedUrl).href : baseUrl + p;
+        return `url(${quote}${absolute}${quote})`;
+      }
+    );
+
+    const baseTag    = `<base href="${baseUrl}" target="_blank">`;
     const faviconTag = `<link rel="icon" type="image/png" href="https://i.postimg.cc/8zGk67y3/FB-IMG-8408596291127656794.jpg" />`;
-    const modifiedHtml = html.includes('<head>')
-      ? html.replace(/<link[^>]*rel=["'](?:icon|shortcut icon)["'][^>]*>/gi, '').replace('<head>', `<head>\n  ${faviconTag}`)
-      : html;
+
+    if (html.includes('<head>')) {
+      html = html
+        .replace(/<link[^>]*rel=["'](?:icon|shortcut icon)["'][^>]*>/gi, '')
+        .replace('<head>', `<head>\n  ${baseTag}\n  ${faviconTag}`);
+    } else if (html.match(/<html/i)) {
+      html = html.replace(/<html[^>]*>/i, m => `${m}\n<head>${baseTag}${faviconTag}</head>`);
+    } else {
+      html = `<head>${baseTag}${faviconTag}</head>\n` + html;
+    }
+
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', 'inline');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('X-Frame-Options', 'ALLOWALL');
     res.setHeader('Content-Security-Policy', '');
-    res.send(modifiedHtml);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.send(html);
+
   } catch (err) {
-    res.status(500).send(`<html><body style="font-family:sans-serif;padding:2rem;color:red"><h2>Error al cargar el archivo</h2><p>${err.message}</p></body></html>`);
+    res.status(500).send(`
+      <html><body style="font-family:sans-serif;padding:2rem;color:red">
+        <h2>Error al cargar el archivo</h2><p>${err.message}</p>
+      </body></html>
+    `);
   }
 });
 
+// ─── DOWNLOAD PROXY ───────────────────────────────────────────────────────────
 app.get('/api/download-proxy', async (req, res) => {
   const { url, filename } = req.query;
   if (!url) return res.status(400).json({ error: 'URL requerida' });
   try {
-    const response = await fetch(decodeURIComponent(url));
+    const decodedUrl = decodeURIComponent(url);
+    const response = await fetch(decodedUrl, {
+      headers: { 'Accept': 'text/html,*/*', 'Cache-Control': 'no-cache' }
+    });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const buffer = Buffer.from(await response.arrayBuffer());
-    const safeFilename = encodeURIComponent(filename || 'archivo.html');
+
+    if (!buffer || buffer.length === 0) {
+      return res.status(500).send('<html><body>El archivo está vacío.</body></html>');
+    }
+
+    const safeFilename = (filename || 'archivo').toString().replace(/[^a-zA-Z0-9._\- ]/g, '') + '.html';
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
     res.setHeader('Content-Length', buffer.length);
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(buffer);
   } catch (err) {
-    res.status(500).json({ error: 'No se pudo descargar el archivo' });
+    res.status(500).json({ error: 'No se pudo descargar: ' + err.message });
   }
 });
 
+// ─── VIDEO PROXY ──────────────────────────────────────────────────────────────
 app.get('/api/video-proxy', (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).send('URL requerida');
@@ -151,7 +211,7 @@ app.get('/api/video-proxy', (req, res) => {
     proxyRes.pipe(res);
     proxyRes.on('error', () => res.end());
   });
-  proxyReq.on('error', (err) => { if (!res.headersSent) res.status(502).send('Error al cargar video'); });
+  proxyReq.on('error', () => { if (!res.headersSent) res.status(502).send('Error al cargar video'); });
   req.on('close', () => proxyReq.destroy());
   proxyReq.end();
 });
