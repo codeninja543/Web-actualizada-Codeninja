@@ -192,10 +192,15 @@ router.get('/id/:id/download', optionalAuth, async (req, res) => {
     if (!sourceUrl) return res.status(404).json({ error: 'Archivo no disponible' });
 
     // ✅ devolver SIEMPRE por proxy para forzar attachment
+    
     const safeFilename = `${template.title || 'archivo'}.html`.replace(/[^a-zA-Z0-9._\- ]/g, '');
+    const forwardedProto = req.headers['x-forwarded-proto'];
+const proto = (Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto) || req.protocol || 'https';
+const host = req.headers['x-forwarded-host'] || req.get('host');
+
     const proxyUrl =
-      `${req.protocol}://${req.get('host')}` +
-      `/api/download-proxy?url=${encodeURIComponent(sourceUrl)}&filename=${encodeURIComponent(safeFilename)}`;
+  `${proto}://${host}` +
+  `/api/download-proxy?url=${encodeURIComponent(sourceUrl)}&filename=${encodeURIComponent(safeFilename)}`;
 
     res.json({ downloadUrl: proxyUrl, title: template.title });
   } catch (err) {

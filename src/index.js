@@ -242,3 +242,4 @@ app.listen(PORT, async () => {
   await verifyTables();
   console.log('✅ Backend listo\n');
 });
+app.set('trust proxy', 1);
