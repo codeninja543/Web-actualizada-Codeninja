@@ -6,6 +6,8 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import authRoutes from './routes/auth.js';
 import oauthRoutes from './routes/oauth.js';
 import templateRoutes from './routes/templates.js';
@@ -23,11 +25,47 @@ const PORT = process.env.PORT || 3001;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+app.set('trust proxy', 1);
+
+app.use(helmet({
+  crossOriginOpenerPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  contentSecurityPolicy: false, 
+}));
+
 app.use((req, res, next) => {
   res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
   res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
   next();
 });
+
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiadas solicitudes, intenta en 15 minutos' },
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15, 
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiados intentos de autenticación, intenta en 15 minutos' },
+});
+
+const ideasLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minuto
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Estás enviando ideas muy rápido, espera un momento' },
+});
+
+app.use('/api/', generalLimiter);
+app.use('/api/auth/', authLimiter);
+app.use('/api/ideas/', ideasLimiter);
 
 const corsOrigins = process.env.FRONTEND_URL
   ? process.env.FRONTEND_URL.split(',').map(s => s.trim()).filter(Boolean)
@@ -52,8 +90,10 @@ app.use(cors({
   methods: ['GET','POST','PUT','DELETE','OPTIONS','PATCH'],
   allowedHeaders: ['Content-Type','Authorization'],
 }));
+
 app.use(express.json({ limit: '200mb' }));
 app.use(express.urlencoded({ extended: true, limit: '200mb' }));
+
 
 app.use('/api/auth',      authRoutes);
 app.use('/api/auth',      oauthRoutes);
@@ -88,11 +128,9 @@ app.get('/api/view-proxy', async (req, res) => {
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-    // Leer como buffer para preservar encoding original
     const rawBuffer = Buffer.from(await response.arrayBuffer());
     let html = rawBuffer.toString('utf-8');
 
-    // Si el HTML está vacío, mostrar error claro
     if (!html || html.trim().length === 0) {
       return res.status(200).send(`
         <html><body style="font-family:sans-serif;padding:2rem;text-align:center">
@@ -104,7 +142,6 @@ app.get('/api/view-proxy', async (req, res) => {
 
     const baseUrl = decodedUrl.substring(0, decodedUrl.lastIndexOf('/') + 1);
 
-    // Convertir src/href relativos a absolutos
     html = html.replace(
       /(src|href|action)=(["'])(?!https?:\/\/)(?!data:)(?!#)(?!mailto:)([^"']+)\2/gi,
       (match, attr, quote, p) => {
@@ -114,7 +151,6 @@ app.get('/api/view-proxy', async (req, res) => {
       }
     );
 
-    // Convertir url() en CSS a absolutos
     html = html.replace(
       /url\((['"]?)(?!https?:\/\/)(?!data:)([^'")]+)\1\)/gi,
       (match, quote, p) => {
@@ -242,4 +278,3 @@ app.listen(PORT, async () => {
   await verifyTables();
   console.log('✅ Backend listo\n');
 });
-app.set('trust proxy', 1);
