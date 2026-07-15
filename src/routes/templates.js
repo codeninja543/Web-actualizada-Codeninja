@@ -77,10 +77,6 @@ async function verifyAdmin(req, res, next) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// LISTADO
-// GET /api/templates
-// ─────────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
     const { category, search, page = 1, limit = 12 } = req.query;
@@ -109,18 +105,16 @@ router.get('/', async (req, res) => {
       return res.json({ templates: [], total: 0, page: pageNum, limit: limitNum, error: error.message });
     }
 
-    res.json({ templates: templates || [], total: count || 0, page: pageNum, limit: limitNum });
+    const safeTemplates = (templates || []).map(({ file_url, file_path, ...rest }) => rest);
+
+    res.json({ templates: safeTemplates, total: count || 0, page: pageNum, limit: limitNum });
   } catch (err) {
     console.error('List error:', err.message);
     res.status(500).json({ error: 'Error al obtener plantillas: ' + err.message });
   }
 });
 
-// ─────────────────────────────────────────────────────────────
-// RUTAS POR ID (SIN AMBIGÜEDAD)
-// ─────────────────────────────────────────────────────────────
 
-// GET /api/templates/id/:id/access
 router.get('/id/:id/access', optionalAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -191,7 +185,6 @@ router.get('/id/:id/download', optionalAuth, async (req, res) => {
 
     if (!sourceUrl) return res.status(404).json({ error: 'Archivo no disponible' });
 
-    // ✅ devolver SIEMPRE por proxy para forzar attachment
     
     const safeFilename = `${template.title || 'archivo'}.html`.replace(/[^a-zA-Z0-9._\- ]/g, '');
     const forwardedProto = req.headers['x-forwarded-proto'];
@@ -240,7 +233,6 @@ router.post('/id/:id/like', optionalAuth, async (req, res) => {
   }
 });
 
-// POST /api/templates/id/:id/purchase
 router.post('/id/:id/purchase', optionalAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -269,7 +261,6 @@ router.post('/id/:id/purchase', optionalAuth, async (req, res) => {
   }
 });
 
-// POST /api/templates/id/:id/copy-link
 router.post('/id/:id/copy-link', async (req, res) => {
   try {
     const { id } = req.params;
@@ -316,7 +307,6 @@ router.patch('/id/:id/price', verifyAdmin, async (req, res) => {
   }
 });
 
-// PATCH /api/templates/id/:id/admin-update (admin)
 router.patch('/id/:id/admin-update', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -347,7 +337,6 @@ router.patch('/id/:id/admin-update', verifyAdmin, async (req, res) => {
   }
 });
 
-// DELETE /api/templates/id/:id (admin)
 router.delete('/id/:id', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -362,15 +351,10 @@ router.delete('/id/:id', verifyAdmin, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────
-// DETALLE POR SLUG (DEBE IR AL FINAL)
-// GET /api/templates/:slug
-// ─────────────────────────────────────────────────────────────
 router.get('/:slug', optionalAuth, async (req, res) => {
   try {
     const { slug } = req.params;
 
-    // si llega UUID aquí, también lo permitimos, pero sin ambigüedad
     const column = isUUID(slug) ? 'id' : 'slug';
 
     const { data: template, error } = await supabase
@@ -382,6 +366,17 @@ router.get('/:slug', optionalAuth, async (req, res) => {
     if (error) return res.status(500).json({ error: 'Error de base de datos: ' + error.message });
     if (!template) return res.status(404).json({ error: 'Plantilla no encontrada' });
     if (!template.published) return res.status(404).json({ error: 'Esta plantilla no está publicada aún' });
+
+   
+    if (template.type === 'vip') {
+      const token = getDownloadToken(req);
+      const access = await getVipAccess({ templateId: template.id, userId: req.user?.id, token });
+      const hasAccess = !!access && (access.remaining_downloads ?? 0) > 0;
+      if (!hasAccess) {
+        delete template.file_url;
+        delete template.file_path;
+      }
+    }
 
     await safeRpc('increment_views', { template_id: template.id });
     res.json(template);
