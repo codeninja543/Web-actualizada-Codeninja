@@ -73,7 +73,28 @@ router.post('/create-order', optionalAuth, async (req, res) => {
 
     const order = await orderRes.json();
 
-    if (!orderRes.ok) throw new Error(JSON.stringify(order));
+    console.log('🟡 Creando orden PayPal:', {
+  amount,
+  currency,
+  templateId,
+  env: process.env.PAYPAL_ENV,
+});
+
+    if (!orderRes.ok) {
+  console.error('❌ PayPal CREATE ORDER ERROR:', {
+    status: orderRes.status,
+    response: order,
+    amount,
+    currency,
+    templateId,
+    env: process.env.PAYPAL_ENV,
+  });
+
+  return res.status(orderRes.status).json({
+    error: 'PayPal rechazó la creación de la orden',
+    paypal: order,
+  });
+}
 
     // Guardar orden
     await supabase.from('paypal_orders').insert({
