@@ -67,7 +67,13 @@ router.post('/create-order', optionalAuth, async (req, res) => {
             value: parseFloat(amount).toFixed(2),
           },
           custom_id: templateId || 'donation',
+          category: 'DIGITAL_GOODS',
         }],
+        application_context: {
+          shipping_preference: 'NO_SHIPPING',
+          user_action: 'PAY_NOW',
+          brand_name: 'CodeNinja5',
+        },
       }),
     });
 
