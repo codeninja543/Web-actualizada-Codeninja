@@ -35,7 +35,7 @@ async function getPayPalToken() {
   const data = await res.json();
 
   if (!res.ok) {
-    console.error('❌ PayPal auth error:', data);
+    console.error('❌ PayPal error:', data);
     throw new Error('Error autenticando con PayPal');
   }
 
@@ -43,42 +43,15 @@ async function getPayPalToken() {
 }
 
 // ── CREATE ORDER ─────────────────────────────
-// El precio se lee de la base de datos, NUNCA del cliente.
 router.post('/create-order', optionalAuth, async (req, res) => {
   try {
-    const { templateId } = req.body;
+    const { amount, currency = 'USD', templateId } = req.body;
 
-    if (!templateId) {
-      return res.status(400).json({ error: 'templateId requerido' });
+    if (!amount) {
+      return res.status(400).json({ error: 'Monto inválido' });
     }
-
-    const { data: template, error: tErr } = await supabase
-      .from('templates')
-      .select('id, title, price')
-      .eq('id', templateId)
-      .single();
-
-    if (tErr || !template) {
-      return res.status(400).json({ error: 'Plantilla no existe' });
-    }
-
-    const price = Number(template.price);
-
-    if (!Number.isFinite(price) || price <= 0) {
-      return res.status(400).json({ error: 'Precio inválido' });
-    }
-
-    const currency = 'USD';
-    const value = price.toFixed(2);
 
     const token = await getPayPalToken();
-
-    console.log('🟡 Creando orden PayPal:', {
-      templateId: template.id,
-      value,
-      currency,
-      env: process.env.PAYPAL_ENV,
-    });
 
     const orderRes = await fetch(`${getPayPalBase()}/v2/checkout/orders`, {
       method: 'POST',
@@ -88,16 +61,14 @@ router.post('/create-order', optionalAuth, async (req, res) => {
       },
       body: JSON.stringify({
         intent: 'CAPTURE',
-        purchase_units: [
-          {
-            amount: {
-              currency_code: currency,
-              value,
-            },
-            custom_id: String(template.id),
-            description: (template.title || 'Plantilla').slice(0, 127),
+        purchase_units: [{
+          amount: {
+            currency_code: currency,
+            value: parseFloat(amount).toFixed(2),
           },
-        ],
+          custom_id: templateId || 'donation',
+          category: 'DIGITAL_GOODS',
+        }],
         application_context: {
           shipping_preference: 'NO_SHIPPING',
           user_action: 'PAY_NOW',
@@ -108,45 +79,41 @@ router.post('/create-order', optionalAuth, async (req, res) => {
 
     const order = await orderRes.json();
 
-    if (!orderRes.ok) {
-      console.error(
-        '❌ PayPal CREATE ORDER ERROR:',
-        JSON.stringify(
-          {
-            status: orderRes.status,
-            response: order,
-            value,
-            currency,
-            templateId: template.id,
-            env: process.env.PAYPAL_ENV,
-          },
-          null,
-          2
-        )
-      );
+    console.log('🟡 Creando orden PayPal:', {
+  amount,
+  currency,
+  templateId,
+  env: process.env.PAYPAL_ENV,
+});
 
-      return res.status(orderRes.status).json({
-        error: 'PayPal rechazó la creación de la orden',
-        paypal: order,
-      });
-    }
+    if (!orderRes.ok) {
+  console.error('❌ PayPal CREATE ORDER ERROR:', {
+    status: orderRes.status,
+    response: order,
+    amount,
+    currency,
+    templateId,
+    env: process.env.PAYPAL_ENV,
+  });
+
+  return res.status(orderRes.status).json({
+    error: 'PayPal rechazó la creación de la orden',
+    paypal: order,
+  });
+}
 
     // Guardar orden
-    const { error: insertErr } = await supabase.from('paypal_orders').insert({
+    await supabase.from('paypal_orders').insert({
       order_id: order.id,
-      template_id: template.id,
+      template_id: templateId || null,
       user_id: req.user?.id || null,
-      amount: price,
+      amount: parseFloat(amount),
       currency,
       status: 'CREATED',
     });
 
-    if (insertErr) {
-      console.error('❌ No se pudo guardar la orden:', insertErr.message);
-      return res.status(500).json({ error: 'No se pudo registrar la orden' });
-    }
-
     res.json({ orderId: order.id });
+
   } catch (err) {
     console.error('❌ create-order:', err.message);
     res.status(500).json({ error: err.message });
@@ -160,28 +127,6 @@ router.post('/capture-order', optionalAuth, async (req, res) => {
 
     if (!orderId || !templateId) {
       return res.status(400).json({ error: 'orderId y templateId requeridos' });
-    }
-
-    // ─────────────────────────────────────────
-    // 🔒 La orden debe existir, ser de ESTA plantilla y no estar usada
-    // ─────────────────────────────────────────
-
-    const { data: savedOrder, error: orderErr } = await supabase
-      .from('paypal_orders')
-      .select('order_id, template_id, status')
-      .eq('order_id', orderId)
-      .single();
-
-    if (orderErr || !savedOrder) {
-      return res.status(400).json({ error: 'Orden no encontrada' });
-    }
-
-    if (String(savedOrder.template_id) !== String(templateId)) {
-      return res.status(400).json({ error: 'La orden no corresponde a esta plantilla' });
-    }
-
-    if (savedOrder.status === 'COMPLETED') {
-      return res.status(400).json({ error: 'Esta orden ya fue procesada' });
     }
 
     // ─────────────────────────────────────────
@@ -254,10 +199,14 @@ router.post('/capture-order', optionalAuth, async (req, res) => {
       throw new Error('Pago no completado');
     }
 
-    const captureData = capture.purchase_units?.[0]?.payments?.captures?.[0];
-    const captureId = captureData?.id;
-    const amount = captureData?.amount?.value;
-    const currency = captureData?.amount?.currency_code;
+    const captureId =
+      capture.purchase_units?.[0]?.payments?.captures?.[0]?.id;
+
+    const amount =
+      capture.purchase_units?.[0]?.payments?.captures?.[0]?.amount?.value;
+
+    const currency =
+      capture.purchase_units?.[0]?.payments?.captures?.[0]?.amount?.currency_code;
 
     // Guardar pago
     await supabase
@@ -287,6 +236,7 @@ router.post('/capture-order', optionalAuth, async (req, res) => {
       title: template.title,
       downloadToken,
     });
+
   } catch (err) {
     console.error('❌ capture-order:', err.message);
     res.status(500).json({ error: err.message });
