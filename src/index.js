@@ -53,10 +53,23 @@ app.use((req, res, next) => {
 
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 200,
+  max: 1000,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiadas solicitudes, intenta en 15 minutos' },
+  skip: (req) => req.path.startsWith('/presence'),
+});
+
+// La presencia (ping cada 25s, contador cada 15s) genera tráfico frecuente
+// y liviano por cada visitante. Como muchos usuarios comparten la misma IP
+// pública (redes móviles, CGNAT), el límite general se agotaba rápido y
+// tumbaba a todo el mundo detrás de esa IP. Le damos su propio límite alto.
+const presenceLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minuto
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiadas solicitudes de presencia' },
 });
 
 const authLimiter = rateLimit({
@@ -113,7 +126,7 @@ app.use('/api/templates', templateRoutes);
 app.use('/api/upload',    uploadRoutes);
 app.use('/api/donations', donationRoutes);
 app.use('/api/paypal',    paypalRoutes);
-app.use('/api/presence',  presenceRoutes);
+app.use('/api/presence',  presenceLimiter, presenceRoutes);
 app.use('/api/ideas',     ideasRoutes);
 
 const frontendDist = process.env.FRONTEND_DIST
