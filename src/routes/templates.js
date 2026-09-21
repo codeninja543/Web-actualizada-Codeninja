@@ -98,7 +98,15 @@ router.get('/', async (req, res) => {
 
     if (search) query = query.ilike('title', `%${search}%`);
 
-    const { data: templates, error, count } = await query.range(offset, offset + limitNum - 1);
+    // Reintenta hasta 2 veces si falla por un error de red transitorio
+    // (por ejemplo, muchos usuarios entrando al mismo tiempo).
+    let templates, error, count;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      ({ data: templates, error, count } = await query.range(offset, offset + limitNum - 1));
+      const isNetworkError = error && /fetch failed|ECONNRESET|ETIMEDOUT|network/i.test(error.message || '');
+      if (!error || !isNetworkError || attempt === 3) break;
+      await new Promise(r => setTimeout(r, 200 * attempt));
+    }
 
     if (error) {
       console.error('Supabase error:', error.message);

@@ -17,6 +17,18 @@ import paypalRoutes from './routes/paypal.js';
 import presenceRoutes from './routes/presence.js';
 import ideasRoutes from './routes/ideas.js';
 import { ensureBuckets, verifyTables } from './lib/supabase.js';
+import { Agent, setGlobalDispatcher } from 'undici';
+
+// Node usa un pool de conexiones limitado por defecto para fetch().
+// Con pocas conexiones, cuando entran varios usuarios a la vez, algunas
+// peticiones salientes hacia Supabase/PayPal fallan con "fetch failed".
+// Aumentamos el pool para soportar más tráfico concurrente.
+setGlobalDispatcher(new Agent({
+  connections: 200,
+  keepAliveTimeout: 30_000,
+  keepAliveMaxTimeout: 60_000,
+  connect: { timeout: 15_000 },
+}));
 
 dotenv.config();
 
