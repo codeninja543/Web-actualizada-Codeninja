@@ -84,25 +84,42 @@ router.get('/', async (req, res) => {
     const limitNum = parseInt(limit);
     const offset = (pageNum - 1) * limitNum;
 
-    let query = supabase
-      .from('templates')
-      .select('*, users(username, avatar_url, role)', { count: 'exact' })
-      .eq('published', true)
-      .order('created_at', { ascending: false });
+    const buildBaseQuery = (selectStr, selectOpts) => {
+      let q = supabase
+        .from('templates')
+        .select(selectStr, selectOpts)
+        .eq('published', true)
+        .order('created_at', { ascending: false });
 
-    if (category && category !== 'todos') {
-      if (category === 'gratis') query = query.eq('type', 'gratis');
-      else if (category === 'vip') query = query.eq('type', 'vip');
-      else query = query.eq('category', category);
+      if (category && category !== 'todos') {
+        if (category === 'gratis') q = q.eq('type', 'gratis');
+        else if (category === 'vip') q = q.eq('type', 'vip');
+        else q = q.eq('category', category);
+      }
+
+      if (search) q = q.ilike('title', `%${search}%`);
+
+      return q;
+    };
+
+    // 1) Primero contamos cuántos resultados hay en total, sin traer filas
+    //    (head: true), para saber si el rango pedido existe siquiera.
+    const { count: totalCount } = await buildBaseQuery('*', { count: 'exact', head: true });
+
+    if (!totalCount || offset >= totalCount) {
+      return res.json({ templates: [], total: totalCount || 0, page: pageNum, limit: limitNum });
     }
 
-    if (search) query = query.ilike('title', `%${search}%`);
+    // Evita pedir un rango fuera de los resultados disponibles (causaba
+    // "Requested range not satisfiable" cuando el offset superaba el total).
+    const safeTo = Math.min(offset + limitNum - 1, totalCount - 1);
 
-    // Reintenta hasta 2 veces si falla por un error de red transitorio
-    // (por ejemplo, muchos usuarios entrando al mismo tiempo).
+    // 2) Reintenta hasta 3 veces si falla por un error de red transitorio
+    //    (por ejemplo, muchos usuarios entrando al mismo tiempo).
     let templates, error, count;
     for (let attempt = 1; attempt <= 3; attempt++) {
-      ({ data: templates, error, count } = await query.range(offset, offset + limitNum - 1));
+      ({ data: templates, error, count } = await buildBaseQuery('*, users(username, avatar_url, role)', { count: 'exact' })
+        .range(offset, safeTo));
       const isNetworkError = error && /fetch failed|ECONNRESET|ETIMEDOUT|network/i.test(error.message || '');
       if (!error || !isNetworkError || attempt === 3) break;
       await new Promise(r => setTimeout(r, 200 * attempt));
