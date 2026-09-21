@@ -157,6 +157,7 @@ router.post('/capture-order', optionalAuth, async (req, res) => {
       console.log('📂 Verificando archivo:', filePath);
 
       const { data: signed } = await supabaseStorage
+        .storage
         .from('templates')
         .createSignedUrl(filePath, 60);
 
