@@ -84,10 +84,10 @@ router.get('/', async (req, res) => {
     const limitNum = parseInt(limit);
     const offset = (pageNum - 1) * limitNum;
 
-    const buildBaseQuery = (selectStr, selectOpts) => {
+    const buildBaseQuery = () => {
       let q = supabase
         .from('templates')
-        .select(selectStr, selectOpts)
+        .select('*, users(username, avatar_url, role)', { count: 'exact' })
         .eq('published', true)
         .order('created_at', { ascending: false });
 
@@ -102,26 +102,31 @@ router.get('/', async (req, res) => {
       return q;
     };
 
-    // 1) Primero contamos cuántos resultados hay en total, sin traer filas
-    //    (head: true), para saber si el rango pedido existe siquiera.
-    const { count: totalCount } = await buildBaseQuery('*', { count: 'exact', head: true });
-
-    if (!totalCount || offset >= totalCount) {
-      return res.json({ templates: [], total: totalCount || 0, page: pageNum, limit: limitNum });
-    }
-
-    // Evita pedir un rango fuera de los resultados disponibles (causaba
-    // "Requested range not satisfiable" cuando el offset superaba el total).
-    const safeTo = Math.min(offset + limitNum - 1, totalCount - 1);
-
-    // 2) Reintenta hasta 3 veces si falla por un error de red transitorio
-    //    (por ejemplo, muchos usuarios entrando al mismo tiempo).
+    // Reintenta hasta 3 veces si falla por un error de red transitorio
+    // (por ejemplo, muchos usuarios entrando al mismo tiempo). Si el error
+    // es "Requested range not satisfiable" (se pidió una página que ya no
+    // existe), reintenta una vez pidiendo la página 1 en vez de fallar.
     let templates, error, count;
+    let rangeFrom = offset;
+    let rangeTo = offset + limitNum - 1;
+
     for (let attempt = 1; attempt <= 3; attempt++) {
-      ({ data: templates, error, count } = await buildBaseQuery('*, users(username, avatar_url, role)', { count: 'exact' })
-        .range(offset, safeTo));
-      const isNetworkError = error && /fetch failed|ECONNRESET|ETIMEDOUT|network/i.test(error.message || '');
-      if (!error || !isNetworkError || attempt === 3) break;
+      ({ data: templates, error, count } = await buildBaseQuery().range(rangeFrom, rangeTo));
+
+      if (!error) break;
+
+      const isRangeError = /requested range not satisfiable/i.test(error.message || '');
+      const isNetworkError = /fetch failed|ECONNRESET|ETIMEDOUT|network/i.test(error.message || '');
+
+      if (isRangeError && rangeFrom !== 0) {
+        // La página pedida ya no existe (por ejemplo, se borraron templates).
+        // Reintentamos con la página 1 para no dejar la lista vacía sin motivo.
+        rangeFrom = 0;
+        rangeTo = limitNum - 1;
+        continue;
+      }
+
+      if (!isNetworkError || attempt === 3) break;
       await new Promise(r => setTimeout(r, 200 * attempt));
     }
 
